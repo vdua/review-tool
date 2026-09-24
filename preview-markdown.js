@@ -41,6 +41,7 @@ try {
 
 // Get stats
 const fileName = path.basename(absoluteMdPath);
+const mdDirectory = path.dirname(absoluteMdPath);
 const fileStats = fs.statSync(absoluteMdPath);
 const lastModified = fileStats.mtime.toLocaleString();
 const fileSizeKB = (fileStats.size / 1024).toFixed(1);
@@ -74,7 +75,7 @@ const htmlContent = `<!DOCTYPE html>
   <!-- JS Libraries -->
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 
   <style>
     :root {
@@ -385,22 +386,75 @@ const htmlContent = `<!DOCTYPE html>
       margin: 16px 0;
       display: flex;
       justify-content: center;
+      align-items: center;
       box-shadow: var(--shadow-sm);
+      overflow-x: auto;
+      max-width: 100%;
     }
     [data-color-mode="dark"] .mermaid {
       background-color: #161b22 !important;
     }
+    .mermaid svg {
+      max-width: 100%;
+      height: auto;
+    }
 
-    /* Fix Mermaid arrowheads color and visibility in light/dark modes */
-    .mermaid .arrowheadPath,
-    .mermaid marker path,
-    .mermaid marker polygon,
-    .mermaid .marker path,
-    .mermaid .marker polygon,
-    .mermaid [id*="arrowhead"] path,
-    .mermaid [id*="arrowhead"] polygon {
-      fill: var(--text-muted) !important;
-      stroke: var(--text-muted) !important;
+    .mermaid-error-box {
+      background: rgba(207, 34, 46, 0.05);
+      border: 1px solid rgba(207, 34, 46, 0.3);
+      border-radius: 6px;
+      padding: 12px 16px;
+      width: 100%;
+      text-align: left;
+      font-family: var(--font-ui);
+    }
+    .mermaid-error-title {
+      font-weight: 600;
+      font-size: 13px;
+      color: #cf222e;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    .mermaid-error-msg {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+    .mermaid-raw-code {
+      background: rgba(0, 0, 0, 0.04);
+      padding: 8px 12px;
+      border-radius: 4px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      overflow-x: auto;
+    }
+    [data-color-mode="dark"] .mermaid-raw-code {
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    /* Image styling & missing image notice */
+    .markdown-body img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 8px;
+      border: 1px solid var(--border-color);
+      box-shadow: var(--shadow-sm);
+      margin: 16px 0;
+      display: inline-block;
+    }
+    .image-missing-notice {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 6px;
+      background: rgba(207, 34, 46, 0.08);
+      border: 1px dashed rgba(207, 34, 46, 0.4);
+      color: #cf222e;
+      font-size: 12px;
+      margin: 8px 0;
     }
 
     /* Top Bar Styling */
@@ -1497,10 +1551,41 @@ const htmlContent = `<!DOCTYPE html>
 
   <!-- Script for Markdown rendering, Theme toggling, TOC, and Search -->
   <script>
+    const fileName = ${JSON.stringify(fileName)};
+    const baseDir = ${JSON.stringify(mdDirectory)};
+
+    // Early initialize Mermaid with loose security to prevent sandbox iframes on file:// URLs
+    if (typeof mermaid !== 'undefined') {
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: 'default',
+        securityLevel: 'loose'
+      });
+    }
 
     // 1. Decode raw Markdown
     const encodedSource = document.getElementById('markdown-source').textContent;
     const markdownText = decodeURIComponent(encodedSource);
+
+    // Helper to resolve relative filesystem paths against baseDir
+    function resolveRelativePath(base, relative) {
+      const stack = base.split('/').filter(Boolean);
+      const parts = relative.split('/');
+      for (const part of parts) {
+        if (part === '.' || part === '') continue;
+        if (part === '..') {
+          if (stack.length > 0) stack.pop();
+        } else {
+          stack.push(part);
+        }
+      }
+      return '/' + stack.join('/');
+    }
+
+    function isExternalOrAbsoluteUrl(url) {
+      if (!url) return false;
+      return url.includes('://') || url.startsWith('data:') || url.startsWith('file:') || url.startsWith('//');
+    }
 
     // Restore sidebar state early to avoid layout flash
     const sidebarHidden = localStorage.getItem('md_review_sidebar_hidden') === 'true';
@@ -1508,7 +1593,7 @@ const htmlContent = `<!DOCTYPE html>
       document.body.classList.add('sidebar-hidden');
     }
 
-    // 2. Setup Marked with Custom Code Renderer (supporting both old & new Marked APIs)
+    // 2. Setup Marked with Custom Code & Image Renderer (supporting both old & new Marked APIs)
     const renderer = new marked.Renderer();
     renderer.code = function(first, second, third) {
       let text = '';
@@ -1523,14 +1608,38 @@ const htmlContent = `<!DOCTYPE html>
       
       const cleanLang = (lang || '').trim().toLowerCase();
       if (cleanLang === 'mermaid') {
-        return \`<pre class="mermaid">\${text}</pre>\`;
+        return \`<pre class="mermaid">\${escapeHtml(text)}</pre>\`;
       }
       
       return \`<pre><code class="hljs language-\${cleanLang || 'text'}">\${escapeHtml(text)}</code></pre>\`;
     };
 
+    renderer.image = function(first, second, third) {
+      let href = '';
+      let title = '';
+      let text = '';
+      if (typeof first === 'object' && first !== null) {
+        href = first.href;
+        title = first.title;
+        text = first.text;
+      } else {
+        href = first;
+        title = second;
+        text = third;
+      }
+
+      let finalSrc = href || '';
+      if (finalSrc && !isExternalOrAbsoluteUrl(finalSrc)) {
+        const resolved = finalSrc.startsWith('/') ? finalSrc : resolveRelativePath(baseDir, finalSrc);
+        finalSrc = 'file://' + encodeURI(resolved);
+      }
+
+      const titleAttr = title ? ' title="' + escapeHtml(title) + '"' : '';
+      return '<img src="' + finalSrc + '" alt="' + escapeHtml(text || '') + '"' + titleAttr + '>';
+    };
+
     function escapeHtml(unsafe) {
-      return unsafe
+      return (unsafe || '')
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
@@ -1732,6 +1841,11 @@ const htmlContent = `<!DOCTYPE html>
         hljsLight.removeAttribute('disabled');
         hljsDark.setAttribute('disabled', 'true');
       }
+
+      // Re-render Mermaid diagrams on theme change
+      if (typeof renderMermaidDiagrams === 'function') {
+        renderMermaidDiagrams();
+      }
     }
 
     const savedTheme = localStorage.getItem('md-preview-theme');
@@ -1830,7 +1944,7 @@ const htmlContent = `<!DOCTYPE html>
       document.querySelectorAll('.comment-badge').forEach(b => b.remove());
       
       elements.forEach((el) => {
-        const text = el.innerText || el.textContent || '';
+        const text = el.getAttribute('data-original-code') || el.innerText || el.textContent || '';
         const cleanText = text.trim().substring(0, 150).replace(/\\s+/g, ' ');
         const hash = simpleHash(cleanText || 'empty');
         const tagName = el.tagName.toLowerCase();
@@ -2712,6 +2826,67 @@ const htmlContent = `<!DOCTYPE html>
       }
     };
 
+    // Sanitize Mermaid code to handle stateDiagram colons & tags in labels
+    function sanitizeMermaidCode(rawCode) {
+      if (!rawCode) return '';
+      const lines = rawCode.split('\\n');
+      const isStateDiagram = lines.some(l => /^\\s*stateDiagram(-v2)?\\b/.test(l));
+
+      if (isStateDiagram) {
+        return lines.map(line => {
+          // Check if line is a transition with label: e.g. "A --> B: label text with extra colons or tags"
+          const transitionMatch = line.match(/^(\\s*[\\w\\*\\-\\[\\]"\\s]+(?:-->|<--|--|\\.\\.>)[\\w\\*\\-\\[\\]"\\s]+:\\s*)(.*)$/);
+          if (transitionMatch) {
+            const prefix = transitionMatch[1];
+            let label = transitionMatch[2];
+            // Escape extra colons in the label to prevent premature DESCR tokens in stateDiagram lexer
+            label = label.replace(/:/g, '&#58;');
+            // Escape raw angle brackets in label that aren't choice/fork markers
+            label = label.replace(/<(?!\<)/g, '&lt;').replace(/(?<!\>)>/g, '&gt;');
+            return prefix + label;
+          }
+          return line;
+        }).join('\\n');
+      }
+
+      return rawCode;
+    }
+
+    // Mermaid diagram renderer with isolated error handling and theme support
+    async function renderMermaidDiagrams() {
+      const mermaidNodes = document.querySelectorAll('pre.mermaid, div.mermaid');
+      if (mermaidNodes.length === 0 || typeof mermaid === 'undefined') return;
+
+      const theme = document.documentElement.getAttribute('data-color-mode');
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: theme === 'dark' ? 'dark' : 'default',
+        securityLevel: 'loose',
+        flowchart: { useMaxWidth: true, htmlLabels: true }
+      });
+
+      for (let i = 0; i < mermaidNodes.length; i++) {
+        const el = mermaidNodes[i];
+        if (!el.getAttribute('data-original-code')) {
+          el.setAttribute('data-original-code', el.textContent);
+        }
+        const code = el.getAttribute('data-original-code');
+        const cleanCode = sanitizeMermaidCode(code);
+        const id = 'mermaid-svg-' + Date.now() + '-' + i;
+
+        try {
+          const { svg } = await mermaid.render(id, cleanCode);
+          el.innerHTML = svg;
+          el.classList.add('mermaid-rendered');
+        } catch (err) {
+          console.error('Mermaid render error for diagram ' + i + ':', err);
+          const stray = document.getElementById(id) || document.getElementById('d' + id);
+          if (stray) stray.remove();
+          el.innerHTML = \`<div class="mermaid-error-box"><div class="mermaid-error-title"><i class="fas fa-exclamation-triangle"></i> Mermaid Render Error</div><div class="mermaid-error-msg">\${escapeHtml(err.message || String(err))}</div><pre class="mermaid-raw-code"><code>\${escapeHtml(code)}</code></pre></div>\`;
+        }
+      }
+    }
+
     // 9. Initial Rendering Cascade
     async function initPreview() {
       try {
@@ -2722,8 +2897,29 @@ const htmlContent = `<!DOCTYPE html>
         const previewEl = document.getElementById('preview');
         previewEl.innerHTML = rawHtml;
 
+        // Resolve any raw <img> elements in markdown that might have relative src
+        previewEl.querySelectorAll('img').forEach(img => {
+          const src = img.getAttribute('src');
+          if (src && !isExternalOrAbsoluteUrl(src)) {
+            const resolved = src.startsWith('/') ? src : resolveRelativePath(baseDir, src);
+            img.src = 'file://' + encodeURI(resolved);
+          }
+          img.onerror = function() {
+            this.style.display = 'none';
+            const notice = document.createElement('div');
+            notice.className = 'image-missing-notice';
+            notice.innerHTML = \`<i class="fas fa-image"></i> <span>Image not found: <code>\${escapeHtml(src || '')}</code></span>\`;
+            if (this.parentNode) {
+              this.parentNode.insertBefore(notice, this.nextSibling);
+            }
+          };
+        });
+
         // Code syntax highlighting
         hljs.highlightAll();
+
+        // Render Mermaid Diagrams before attaching comment keys
+        await renderMermaidDiagrams();
 
         // Generate TOC
         generateTOC(previewEl);
@@ -2745,21 +2941,6 @@ const htmlContent = `<!DOCTYPE html>
             toggleBtn.className = 'fa-solid fa-angles-right';
           }
         }
-
-        // Render Mermaid Diagrams if any exist
-        const mermaidCharts = (markdownText.match(new RegExp('\\\\x60\\\\x60\\\\x60mermaid', 'g')) || []).length;
-        if (mermaidCharts > 0 && typeof mermaid !== 'undefined') {
-          const theme = document.documentElement.getAttribute('data-color-mode');
-          mermaid.initialize({
-            startOnLoad: false,
-            theme: theme === 'dark' ? 'dark' : 'default',
-            securityLevel: 'loose',
-            flowchart: { useMaxWidth: true, htmlLabels: true }
-          });
-          
-          await mermaid.run();
-        }
-        
       } catch (err) {
         console.error('Error during preview rendering:', err);
       } finally {
