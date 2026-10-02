@@ -364,6 +364,7 @@ const htmlContent = `<!DOCTYPE html>
       max-width: 900px;
       background-color: transparent;
       animation: fadeIn 0.6s ease;
+      transition: max-width var(--transition-speed) ease;
     }
 
     /* Markdown Body Overrides */
@@ -375,6 +376,29 @@ const htmlContent = `<!DOCTYPE html>
 
     [data-color-mode="dark"] .markdown-body {
       --color-canvas-default: transparent !important;
+    }
+
+    /* Table Styling Overrides for Full Width & No Horizontal Scroll */
+    .markdown-body table {
+      display: table !important;
+      width: 100% !important;
+      max-width: 100% !important;
+      table-layout: auto;
+      border-collapse: collapse;
+      margin: 16px 0 !important;
+      overflow-wrap: break-word;
+    }
+
+    .markdown-body table th,
+    .markdown-body table td {
+      white-space: normal !important;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }
+
+    .markdown-body table code {
+      white-space: pre-wrap !important;
+      word-break: break-word !important;
     }
     
     /* Mermaid diagram container styling */
@@ -564,6 +588,9 @@ const htmlContent = `<!DOCTYPE html>
     }
     body.sidebar-hidden .top-bar {
       left: 0;
+    }
+    body.sidebar-hidden .preview-container {
+      max-width: 100%;
     }
 
     /* Loader Overlay */
